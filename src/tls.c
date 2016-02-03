@@ -40,6 +40,10 @@
 #include "config.h"
 #include "tls.h"
 
+#include <poll.h>
+#include <fcntl.h>
+#include <arpa/inet.h>
+
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
@@ -65,6 +69,7 @@ static pthread_once_t tls_ctx_once = PTHREAD_ONCE_INIT;
 static void tls_ctx_init(void)
 {
 	pthread_key_create(&tls_ctx_key, NULL);
+	pthread_key_create(&tls_store_key, (void (*)(void *))X509_STORE_free);
 
 	/* init OpenSSL */
 	SSL_load_error_strings();
@@ -198,10 +203,16 @@ API int nc_tls_init(const char* peer_cert, const char* peer_key, const char *CAf
 	}
 
 	/* prepare global SSL context, allow only mandatory TLS 1.2  */
-	if ((tls_ctx = SSL_CTX_new(TLSv1_2_client_method())) == NULL) {
+	if ((tls_ctx = SSL_CTX_new(SSLv23_client_method()/*TLSv1_2_client_method()*/)) == NULL) {
 		ERROR("Unable to create OpenSSL context (%s)", ERR_reason_error_string(ERR_get_error()));
 		return (EXIT_FAILURE);
 	}
+
+#if 0
+	SSL_CTX_set_options(tls_ctx, SSL_OP_ALL);
+#endif
+	SSL_CTX_set_options(tls_ctx, SSL_OP_NO_SSLv2);
+	SSL_CTX_set_options(tls_ctx, SSL_OP_NO_SSLv3);
 
 	/* force peer certificate verification (NO_PEER_CERT and CLIENT_ONCE are ignored when
 	 * acting as client, but included just in case) and optionaly set CRL checking callback */
@@ -232,10 +243,12 @@ API int nc_tls_init(const char* peer_cert, const char* peer_key, const char *CAf
 			}
 		}
 
-		if ((ret = pthread_key_create(&tls_store_key, (void (*)(void *))X509_STORE_free)) != 0) {
+#if 0
+		if ((ret = pthread_key_create(&tls_store_key, (void (*)(void *))X509_STORE_free)) != 0) { /* FIXME */
 			ERROR("Unable to create pthread key: %s", strerror(ret));
 			return (EXIT_FAILURE);
 		}
+#endif
 		if ((ret = pthread_setspecific(tls_store_key, tls_store)) != 0) {
 			ERROR("Unable to set thread-specific data: %s", strerror(ret));
 			return (EXIT_FAILURE);
@@ -292,6 +305,7 @@ struct nc_session *nc_session_connect_tls_socket(const char* username, const cha
 	pthread_mutexattr_t mattr;
 	int verify, r;
 	SSL_CTX* tls_ctx;
+	int timeout = 0;
 
 	tls_ctx = pthread_getspecific(tls_ctx_key);
 	if (tls_ctx == NULL) {
@@ -336,7 +350,7 @@ struct nc_session *nc_session_connect_tls_socket(const char* username, const cha
 
 	/* Set the SSL_MODE_AUTO_RETRY flag to allow OpenSSL perform re-handshake automatically */
 	SSL_set_mode(retval->tls, SSL_MODE_AUTO_RETRY);
-
+#if 0
 	/* connect and perform the handshake */
 	if (SSL_connect(retval->tls) != 1) {
 		ERROR("Connecting over TLS failed (%s).", ERR_reason_error_string(ERR_get_error()));
@@ -345,6 +359,89 @@ struct nc_session *nc_session_connect_tls_socket(const char* username, const cha
 		free(retval);
 		return (NULL);
 	}
+#else
+	do {
+		int flags;
+
+		flags = fcntl(sock, F_GETFL, 0);
+		fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+	} while(0);
+
+	while (ERR_get_error()) ;
+
+	do {
+		int r, status, ssl_e;
+		unsigned long e;
+		struct pollfd pfd;
+		struct sockaddr_in peer;
+		char buf[32] = { 0 };
+		char *m;
+		socklen_t len;
+#define SSL_CONNECT_TIMEOUT_SLICE	(50)
+#define SSL_CONNECT_TIMEOUT_TIMES	((15 * 1000) / SSL_CONNECT_TIMEOUT_SLICE)
+
+		r = SSL_connect(retval->tls);
+		if (r == 1)
+			break;
+		ssl_e = SSL_get_error(retval->tls, r);
+		switch (ssl_e) {
+			case SSL_ERROR_SYSCALL:
+				e = ERR_get_error();
+				if (e == 0)
+					m = r ? strerror(errno) : "EOF";
+				else
+					m = ERR_reason_error_string(e);
+
+				len = sizeof(peer);
+				getpeername(sock, (struct sockaddr *) &peer, &len);
+				inet_ntop(AF_INET, &(peer.sin_addr), buf, sizeof(buf));
+				ERROR("Connecting over TLS failed (%s #%d:SSL_ERROR_SYSCALL %s).", buf, r, m);
+				goto byebye;
+			case SSL_ERROR_WANT_WRITE:
+				pfd.fd = sock;
+				pfd.events = POLLOUT;
+				status = poll(&pfd, 1, SSL_CONNECT_TIMEOUT_SLICE);
+				if (status == 0 && (++timeout == SSL_CONNECT_TIMEOUT_TIMES)) {
+					len = sizeof(peer);
+					getpeername(sock, (struct sockaddr *) &peer, &len);
+					inet_ntop(AF_INET, &(peer.sin_addr), buf, sizeof(buf));
+					ERROR("Connecting over TLS failed (%s hit SSL_CONNECT_TIMEOUT_TIMES).", buf);
+					goto byebye;
+				}
+				break;
+			case SSL_ERROR_WANT_READ:
+				pfd.fd = sock;
+				pfd.events = POLLIN;
+				status = poll(&pfd, 1, SSL_CONNECT_TIMEOUT_SLICE);
+				if (status == 0 && (++timeout == SSL_CONNECT_TIMEOUT_TIMES)) {
+					len = sizeof(peer);
+					getpeername(sock, (struct sockaddr *) &peer, &len);
+					inet_ntop(AF_INET, &(peer.sin_addr), buf, sizeof(buf));
+					ERROR("Connecting over TLS failed (%s hit SSL_CONNECT_TIMEOUT_TIMES).", buf);
+					goto byebye;
+				}
+				break;
+			default:
+				len = sizeof(peer);
+				getpeername(sock, (struct sockaddr *) &peer, &len);
+				inet_ntop(AF_INET, &(peer.sin_addr), buf, sizeof(buf));
+				ERROR("Connecting over TLS failed (%s %d).", buf, ssl_e);
+byebye:
+				SSL_free(retval->tls);
+				free(retval->stats);
+				free(retval);
+				return (NULL);
+		}
+
+	} while(1);
+
+	do {
+		int flags;
+
+		flags = fcntl(sock, F_GETFL, 0);
+		fcntl(sock, F_SETFL, flags & (~O_NONBLOCK));
+	} while(0);
+#endif
 
 	/* check certificate checking */
 	verify = SSL_get_verify_result(retval->tls);
