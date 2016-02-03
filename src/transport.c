@@ -98,6 +98,20 @@ char** get_schemas_capabilities(struct nc_cpblts *cpblts);
 
 extern struct nc_shared_info *nc_info;
 
+static pthread_once_t accept_serializer_once = PTHREAD_ONCE_INIT;
+static pthread_mutex_t accept_serializer;
+static void accept_serializer_init(void)
+{
+	pthread_mutexattr_t ma;
+
+	pthread_mutexattr_init(&ma);
+
+	pthread_mutexattr_setpshared(&ma, PTHREAD_PROCESS_SHARED);
+	pthread_mutexattr_setrobust(&ma, PTHREAD_MUTEX_ROBUST);
+
+	pthread_mutex_init(&accept_serializer, &ma);
+	pthread_mutexattr_destroy(&ma);
+}
 static pthread_key_t transproto_key;
 static pthread_once_t transproto_key_once = PTHREAD_ONCE_INIT;
 static NC_TRANSPORT proto_ssh = NC_TRANSPORT_SSH;
@@ -1373,7 +1387,9 @@ API struct nc_session *nc_callhome_accept(const char *username, const struct nc_
 	char host[INET6_ADDRSTRLEN];
 	int status, i;
 	NC_TRANSPORT *transport_proto;
+	struct pollfd listen_socket[2];
 
+	pthread_once(&accept_serializer_once, accept_serializer_init);
 	pthread_once(&transproto_key_once, transproto_init);
 	if ((transport_proto = pthread_getspecific(transproto_key)) == NULL) {
 		pthread_setspecific(transproto_key, &proto_ssh);
@@ -1392,11 +1408,42 @@ API struct nc_session *nc_callhome_accept(const char *username, const struct nc_
 		return (NULL);
 	}
 
-	reverse_listen_socket[0].revents = 0;
-	reverse_listen_socket[1].revents = 0;
+	listen_socket[0].fd = reverse_listen_socket[0].fd;
+	listen_socket[0].events = reverse_listen_socket[0].events;
+	listen_socket[0].revents = 0;
+	listen_socket[1].fd = reverse_listen_socket[1].fd;
+	listen_socket[1].events = reverse_listen_socket[1].events;
+	listen_socket[1].revents = 0;
 	while (1) {
 		DBG("Waiting %dms for incoming call home connections...", *timeout);
-		status = poll(reverse_listen_socket, 2, *timeout);
+#if 1
+		if (*timeout < 0) {
+			pthread_mutex_lock(&accept_serializer);
+			status = poll(listen_socket, 2, *timeout);
+			pthread_mutex_unlock(&accept_serializer);
+		} else {
+			struct timespec abs_time;
+			int ret;
+
+			clock_gettime(CLOCK_REALTIME, &abs_time);
+			abs_time.tv_sec += (*timeout) / 1000; /* timeout is millisecond */
+			abs_time.tv_nsec += ((*timeout) % 1000) * 1000;
+			if (abs_time.tv_nsec > 1000*1000*1000) {
+				abs_time.tv_sec++;
+				abs_time.tv_nsec -= 1000*1000*1000;
+			}
+
+			ret = pthread_mutex_timedlock(&accept_serializer, &abs_time);
+			if (ret == ETIMEDOUT) {
+				*timeout = 0;
+				return (NULL);
+			}
+			status = poll(listen_socket, 2, *timeout);
+			pthread_mutex_unlock(&accept_serializer);
+		}
+#else
+		status = poll(listen_socket, 2, *timeout);
+#endif
 
 		if (status == 0) {
 			/* timeout */
@@ -1411,14 +1458,17 @@ API struct nc_session *nc_callhome_accept(const char *username, const struct nc_
 			return (NULL);
 		} else if (status > 0) {
 			for (i = 0; i < 2; i++) {
-				if ((reverse_listen_socket[i].revents & POLLHUP) || (reverse_listen_socket[i].revents & POLLERR)) {
+				if ((listen_socket[i].revents & POLLHUP) || (listen_socket[i].revents & POLLERR)) {
 					/* close pipe/fd - other side already did it */
 					ERROR("Listening socket is down.");
 					close(reverse_listen_socket[i].fd);
 					return (NULL );
-				} else if (reverse_listen_socket[i].revents & POLLIN) {
+				} else if (listen_socket[i].revents & POLLIN) {
+					int on = 1;
 					/* accept call home */
-					sock = accept(reverse_listen_socket[i].fd, (struct sockaddr*) &remote, &addr_size);
+					sock = accept(listen_socket[i].fd, (struct sockaddr*) &remote, &addr_size);
+					if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on)) != 0)
+						WARN("accepted socket failed to be KEEPALIVE");
 					goto netconf_connect;
 				}
 			}
