@@ -1248,6 +1248,7 @@ void nc_session_close(struct nc_session* session, NC_SESSION_TERM_REASON reason)
 			/* server TLS session, do not close or free */
 			if (!session->is_server) {
 				SSL_shutdown(session->tls);
+				close(SSL_get_fd(session->tls));
 				SSL_free(session->tls);
 			}
 			session->tls = NULL;
