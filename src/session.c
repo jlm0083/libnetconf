@@ -1247,7 +1247,8 @@ void nc_session_close(struct nc_session* session, NC_SESSION_TERM_REASON reason)
 			}
 			/* server TLS session, do not close or free */
 			if (!session->is_server) {
-				SSL_shutdown(session->tls);
+				if (SSL_get_shutdown(session->tls) == 0)
+					SSL_shutdown(session->tls);
 				close(SSL_get_fd(session->tls));
 				SSL_free(session->tls);
 			}
@@ -2000,7 +2001,7 @@ static NC_MSG_TYPE nc_session_receive(struct nc_session* session, int timeout, s
 		if (session->tls != NULL) {
 			/* we are getting data from TLS session using OpenSSL */
 			fds.fd = SSL_get_fd(session->tls);
-			fds.events = POLLIN;
+			fds.events = POLLIN | POLLRDHUP;
 			fds.revents = 0;
 			status = poll(&fds, 1, timeout);
 
@@ -2063,7 +2064,7 @@ static NC_MSG_TYPE nc_session_receive(struct nc_session* session, int timeout, s
 		/* status > 0 */
 		/* check the status of the socket */
 		/* if nothing to read and POLLHUP (EOF) or POLLERR set */
-		if ((revents & POLLHUP) || (revents & POLLERR)) {
+		if ((revents & POLLHUP) || (revents & POLLERR) || (revents & POLLRDHUP)) {
 			/* close client's socket (it's probably already closed by client */
 			DBG_UNLOCK("mut_channel");
 			pthread_mutex_unlock(session->mut_channel);
