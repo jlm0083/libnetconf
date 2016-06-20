@@ -362,9 +362,13 @@ struct nc_session *nc_session_connect_tls_socket(const char* username, const cha
 #else
 	do {
 		int flags;
+		struct timeval timeout = { 300, 0 };
 
 		flags = fcntl(sock, F_GETFL, 0);
 		fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+		if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) != 0) {
+			ERROR("setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO...) failed");
+		}
 	} while(0);
 
 	while (ERR_get_error()) ;
@@ -380,9 +384,16 @@ struct nc_session *nc_session_connect_tls_socket(const char* username, const cha
 #define SSL_CONNECT_TIMEOUT_SLICE	(50)
 #define SSL_CONNECT_TIMEOUT_TIMES	((15 * 1000) / SSL_CONNECT_TIMEOUT_SLICE)
 
+
+		len = sizeof(peer);
+		getpeername(sock, (struct sockaddr *) &peer, &len);
+
 		r = SSL_connect(retval->tls);
 		if (r == 1)
 			break;
+
+		inet_ntop(AF_INET, &(peer.sin_addr), buf, sizeof(buf));
+
 		ssl_e = SSL_get_error(retval->tls, r);
 		switch (ssl_e) {
 			case SSL_ERROR_SYSCALL:
@@ -392,9 +403,6 @@ struct nc_session *nc_session_connect_tls_socket(const char* username, const cha
 				else
 					m = ERR_reason_error_string(e);
 
-				len = sizeof(peer);
-				getpeername(sock, (struct sockaddr *) &peer, &len);
-				inet_ntop(AF_INET, &(peer.sin_addr), buf, sizeof(buf));
 				ERROR("Connecting over TLS failed (%s #%d:SSL_ERROR_SYSCALL %s).", buf, r, m);
 				goto byebye;
 			case SSL_ERROR_WANT_WRITE:
@@ -402,9 +410,6 @@ struct nc_session *nc_session_connect_tls_socket(const char* username, const cha
 				pfd.events = POLLOUT;
 				status = poll(&pfd, 1, SSL_CONNECT_TIMEOUT_SLICE);
 				if (status == 0 && (++timeout == SSL_CONNECT_TIMEOUT_TIMES)) {
-					len = sizeof(peer);
-					getpeername(sock, (struct sockaddr *) &peer, &len);
-					inet_ntop(AF_INET, &(peer.sin_addr), buf, sizeof(buf));
 					ERROR("Connecting over TLS failed (%s hit SSL_CONNECT_TIMEOUT_TIMES).", buf);
 					goto byebye;
 				}
@@ -414,17 +419,11 @@ struct nc_session *nc_session_connect_tls_socket(const char* username, const cha
 				pfd.events = POLLIN;
 				status = poll(&pfd, 1, SSL_CONNECT_TIMEOUT_SLICE);
 				if (status == 0 && (++timeout == SSL_CONNECT_TIMEOUT_TIMES)) {
-					len = sizeof(peer);
-					getpeername(sock, (struct sockaddr *) &peer, &len);
-					inet_ntop(AF_INET, &(peer.sin_addr), buf, sizeof(buf));
 					ERROR("Connecting over TLS failed (%s hit SSL_CONNECT_TIMEOUT_TIMES).", buf);
 					goto byebye;
 				}
 				break;
 			default:
-				len = sizeof(peer);
-				getpeername(sock, (struct sockaddr *) &peer, &len);
-				inet_ntop(AF_INET, &(peer.sin_addr), buf, sizeof(buf));
 				ERROR("Connecting over TLS failed (%s %d).", buf, ssl_e);
 byebye:
 				SSL_free(retval->tls);
