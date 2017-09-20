@@ -1242,7 +1242,7 @@ void nc_session_close(struct nc_session* session, NC_SESSION_TERM_REASON reason)
 #endif
 #ifdef ENABLE_TLS
 		if (session->tls != NULL) {
-			if (session->status == NC_SESSION_STATUS_WORKING && !session->is_server) {
+			if (session->status == NC_SESSION_STATUS_WORKING && !session->is_server && reason != NC_SESSION_TERM_DROPPED) {
 				announce_nc_session_closing(session);
 			}
 			/* server TLS session, do not close or free */
