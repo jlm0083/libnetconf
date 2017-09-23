@@ -1669,28 +1669,34 @@ static int nc_session_read_len(struct nc_session* session, size_t chunk_length, 
 #ifdef ENABLE_TLS
 		if (session->tls) {
 			/* read via OpenSSL */
+			ERR_clear_error();
 			c = SSL_read(session->tls, &(buf[rd]), chunk_length - rd);
-			if (c <= 0 && (r = SSL_get_error(session->tls, c))) {
-				if (r == SSL_ERROR_WANT_READ) {
+			if (c <= 0) {
+				switch (r = SSL_get_error(session->tls, c)) {
+				case SSL_ERROR_WANT_READ:
 					usleep(NC_READ_SLEEP);
 					continue;
-				} else {
-					if (r == SSL_ERROR_SYSCALL) {
-						ERROR("Reading from the TLS session failed (%s)", strerror(errno));
-					} else if (r == SSL_ERROR_SSL) {
-						ERROR("Reading from the TLS session failed (%s)", ERR_error_string(r, NULL));
-					} else {
-						ERROR("Reading from the TLS session failed (SSL code %d)", r);
-					}
-					free (buf);
-					if (len != NULL) {
-						*len = 0;
-					}
-					if (text != NULL) {
-						*text = NULL;
-					}
-					return (EXIT_FAILURE);
+				case SSL_ERROR_SYSCALL:
+					ERROR("Read from the TLS session failed (SSL_ERROR_SYSCALL) (%d, %d, %d)", c, ERR_get_error(), errno);
+					break;
+				case SSL_ERROR_SSL:
+					ERROR("Read from the TLS session failed (SSL_ERROR_SSL) (%d)", ERR_get_error());
+					break;
+				case SSL_ERROR_ZERO_RETURN:
+					ERROR("Read from the TLS session failed (SSL_ERROR_ZERO_RETURN)");
+					break;
+				default:
+					ERROR("Reading from the TLS session failed (SSL code %d)", r);
+					break;
 				}
+				free(buf);
+				if (len != NULL) {
+					*len = 0;
+				}
+				if (text != NULL) {
+					*text = NULL;
+				}
+				return (EXIT_FAILURE);
 			}
 		} else
 #endif
@@ -1735,7 +1741,7 @@ static int nc_session_read_until(struct nc_session* session, const char* endtag,
 	char *buf = NULL;
 	size_t buflen = 0;
 #ifdef ENABLE_TLS
-	int r;
+	int x;
 #endif
 
 	/* check if we can work with the session */
@@ -1803,28 +1809,34 @@ static int nc_session_read_until(struct nc_session* session, const char* endtag,
 #ifdef ENABLE_TLS
 		if (session->tls) {
 			/* read via OpenSSL */
+			ERR_clear_error();
 			c = SSL_read(session->tls, &(buf[rd]), 1);
-			if (c <= 0 && (r = SSL_get_error(session->tls, c))) {
-				if (r == SSL_ERROR_WANT_READ) {
+			if (c <= 0) {
+				switch (x = SSL_get_error(session->tls, c)) {
+				case SSL_ERROR_WANT_READ:
 					usleep(NC_READ_SLEEP);
 					continue;
-				} else {
-					if (r == SSL_ERROR_SYSCALL) {
-						ERROR("Reading from the TLS session failed (%s)", strerror(errno));
-					} else if (r == SSL_ERROR_SSL) {
-						ERROR("Reading from the TLS session failed (%s)", ERR_error_string(r, NULL));
-					} else {
-						ERROR("Reading from the TLS session failed (SSL code %d)", r);
-					}
-					free (buf);
-					if (len != NULL) {
-						*len = 0;
-					}
-					if (text != NULL) {
-						*text = NULL;
-					}
-					return (EXIT_FAILURE);
+				case SSL_ERROR_SYSCALL:
+					ERROR("Read from the TLS session failed (SSL_ERROR_SYSCALL) (%d, %d, %d)", c, ERR_get_error(), errno);
+					break;
+				case SSL_ERROR_SSL:
+					ERROR("Read from the TLS session failed (SSL_ERROR_SSL) (%d)", ERR_get_error());
+					break;
+				case SSL_ERROR_ZERO_RETURN:
+					ERROR("Read from the TLS session failed (SSL_ERROR_ZERO_RETURN)");
+					break;
+				default:
+					ERROR("Reading from the TLS session failed (SSL code %d)", x);
+					break;
 				}
+				free(buf);
+				if (len != NULL) {
+					*len = 0;
+				}
+				if (text != NULL) {
+					*text = NULL;
+				}
+				return (EXIT_FAILURE);
 			}
 		} else
 #endif
@@ -2269,12 +2281,11 @@ static NC_MSG_TYPE nc_session_receive(struct nc_session* session, int timeout, s
 	(*msg)->session = session;
 	return (msgtype);
 
-malformed_msg_channels_unlock:
 	DBG_UNLOCK("mut_channel");
 	pthread_mutex_unlock(session->mut_channel);
 
 malformed_msg:
-	if (session->version == NETCONFV11 && session->ssh_sess == NULL) {
+	if (session->version == NETCONFV11 && session->ssh_sess == NULL) { /* FIXME not every error should be replied */
 		/* NETCONF version 1.1 define sending error reply from the server */
 		reply = nc_reply_error(nc_err_new(NC_ERR_MALFORMED_MSG));
 		if (reply == NULL) {
@@ -2293,6 +2304,16 @@ malformed_msg:
 
 	ERROR("Malformed message received, closing the session %s.", session->session_id);
 	nc_session_close(session, NC_SESSION_TERM_OTHER);
+
+	return (NC_MSG_UNKNOWN);
+
+
+malformed_msg_channels_unlock:
+	DBG_UNLOCK("mut_channel");
+	pthread_mutex_unlock(session->mut_channel);
+
+	ERROR("Malformed message received, closing the session %s.", session->session_id);
+	nc_session_close(session, NC_SESSION_TERM_DROPPED);
 
 	return (NC_MSG_UNKNOWN);
 }
