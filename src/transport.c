@@ -1465,10 +1465,12 @@ API struct nc_session *nc_callhome_accept(const char *username, const struct nc_
 					return (NULL );
 				} else if (listen_socket[i].revents & POLLIN) {
 					int on = 1;
+					unsigned int tcp_user_timeout = 30000; /* 30 seconds */
 					/* accept call home */
 					sock = accept(listen_socket[i].fd, (struct sockaddr*) &remote, &addr_size);
 					if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on)) != 0)
 						WARN("accepted socket failed to be KEEPALIVE");
+					setsockopt(sock, SOL_TCP, TCP_USER_TIMEOUT, &tcp_user_timeout, sizeof(unsigned int));
 					goto netconf_connect;
 				}
 			}
