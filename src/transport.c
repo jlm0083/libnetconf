@@ -49,6 +49,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <pthread.h>
 #include <pwd.h>
@@ -1120,7 +1121,7 @@ static int get_socket(const char* port, int family)
 	}
 
 	for (i = 1, res = res_list; res != NULL; res = res->ai_next) {
-		sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+		sock = socket(res->ai_family, res->ai_socktype | SOCK_CLOEXEC, res->ai_protocol);
 		if (sock == -1) {
 			/* socket was not created, try another resource */
 			i = errno;
