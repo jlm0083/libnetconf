@@ -1182,6 +1182,7 @@ API int nc_callhome_listen(unsigned int port)
 		return (EXIT_FAILURE);
 	}
 
+#if 0
 	/* set default values */
 	if (port == 0) {
 		port = NC_REVERSE_PORT;
@@ -1195,6 +1196,26 @@ API int nc_callhome_listen(unsigned int port)
 
 	reverse_listen_socket[0].fd = get_socket(port_s, AF_INET);
 	reverse_listen_socket[1].fd = get_socket(port_s, AF_INET6);
+#else
+	if (port == 0) {
+		int _ports[2] = { 4335, 6667 };
+
+		snprintf(port_s, SHORT_INT_LENGTH, "%d", _ports[0]);
+		reverse_listen_socket[0].fd = get_socket(port_s, AF_INET);
+		snprintf(port_s, SHORT_INT_LENGTH, "%d", _ports[1]);
+		reverse_listen_socket[1].fd = get_socket(port_s, AF_INET);
+	}
+	else {
+		if (snprintf(port_s, SHORT_INT_LENGTH, "%d", port) < 0) {
+			/* converting short int to the string failed */
+			ERROR("Unable to convert the port number to a string.");
+			return (EXIT_FAILURE);
+		}
+
+		reverse_listen_socket[0].fd = get_socket(port_s, AF_INET);
+		reverse_listen_socket[1].fd = get_socket(port_s, AF_INET6);
+	}
+#endif
 	if (set_socket_listening(reverse_listen_socket[0].fd) ||
 			set_socket_listening(reverse_listen_socket[1].fd)) {
 		close(reverse_listen_socket[0].fd);
