@@ -142,7 +142,10 @@ static struct session_list_map *session_list = NULL;
 /**
  * Sleep time in microseconds to wait between unsuccessful reading due to EAGAIN or EWOULDBLOCK
  */
-#define NC_READ_SLEEP 100
+#define READ_TIMEOUT 120 /* seconds */
+#define NC_READ_SLEEP 3000
+#define NC_WRITE_SLEEP 3000
+
 #ifdef DISABLE_LIBSSH
 #ifdef ENABLE_TLS
 #define NC_WRITE(session,buf,c,ret) \
@@ -1420,9 +1423,12 @@ static int nc_session_send(struct nc_session* session, struct nc_msg *msg)
 #ifndef DISABLE_LIBSSH
 	const char *emsg;
 #endif
-	char buf[1024];
+	char buf[1024], *_buf;
 	struct pollfd fds;
 	int ret;
+#ifdef ENABLE_TLS
+	int r;
+#endif
 
 	if (session->fd_output == -1 && session->transport_socket == -1
 #ifndef DISABLE_LIBSSH
@@ -1504,13 +1510,60 @@ static int nc_session_send(struct nc_session* session, struct nc_msg *msg)
 		snprintf (buf, 1024, "\n#%d\n", (int) strlen (text));
 		c = 0;
 		do {
+#if 0
 			NC_WRITE(session, &(buf[c]), c, ret);
 			if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-				usleep(10);
+				usleep(NC_WRITE_SLEEP);
 				continue;
 			}
+#else
+			_buf = &(buf[c]);
 #ifndef DISABLE_LIBSSH
-			if (ret == SSH_ERROR) {
+			if(session->ssh_chan) {
+				ret = ssh_channel_write(session->ssh_chan, _buf, strlen(_buf));
+				if (ret > 0) {c += ret;}
+			} else
+#endif
+#ifdef ENABLE_TLS
+			if (session->tls) {
+				ret = SSL_write(session->tls, _buf, strlen(_buf));
+				if (ret > 0) {c += ret;}
+				else {
+					switch (r = SSL_get_error(session->tls, ret)) {
+					case SSL_ERROR_WANT_READ:
+					case SSL_ERROR_WANT_WRITE:
+						usleep(NC_WRITE_SLEEP);
+						continue;
+					case SSL_ERROR_SYSCALL:
+						ERROR("Write to the TLS session failed (SSL_ERROR_SYSCALL) (%d, %d, %d)", ret, ERR_get_error(), errno);
+						break;
+					case SSL_ERROR_SSL:
+						ERROR("Write to the TLS session failed (SSL_ERROR_SSL) (%d)", ERR_get_error());
+						break;
+					case SSL_ERROR_ZERO_RETURN:
+						ERROR("Write to the TLS session failed (SSL_ERROR_ZERO_RETURN)");
+						break;
+					default:
+						ERROR("Write to the TLS session failed (SSL code %d)", r);
+						break;
+					}
+				}
+			} else
+#endif
+			if (session->fd_output != -1) {
+				ret = write(session->fd_output, _buf, strlen(_buf));
+				if (ret > 0) {c += ret;}
+				else if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+					usleep(NC_WRITE_SLEEP);
+					continue;
+				}
+			} else {
+				ret = -1;
+			}
+#endif
+
+#ifndef DISABLE_LIBSSH
+			if (session->ssh_chan && ret == SSH_ERROR) {
 				DBG_UNLOCK("mut_channel");
 				session->mut_channel_flag = 0;
 				pthread_mutex_unlock(session->mut_channel);
@@ -1539,13 +1592,60 @@ static int nc_session_send(struct nc_session* session, struct nc_msg *msg)
 	/* write the message */
 	c = 0;
 	do {
+#if 0
 		NC_WRITE(session, &(text[c]), c, ret);
 		if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-			usleep(10);
+			usleep(NC_WRITE_SLEEP);
 			continue;
 		}
+#else
+		_buf = &(text[c]);
 #ifndef DISABLE_LIBSSH
-		if (ret == SSH_ERROR) {
+		if(session->ssh_chan) {
+			ret = ssh_channel_write(session->ssh_chan, _buf, strlen(_buf));
+			if (ret > 0) {c += ret;}
+		} else
+#endif
+#ifdef ENABLE_TLS
+		if (session->tls) {
+			ret = SSL_write(session->tls, _buf, strlen(_buf));
+			if (ret > 0) {c += ret;}
+			else {
+				switch (r = SSL_get_error(session->tls, ret)) {
+				case SSL_ERROR_WANT_READ:
+				case SSL_ERROR_WANT_WRITE:
+					usleep(NC_WRITE_SLEEP);
+					continue;
+				case SSL_ERROR_SYSCALL:
+					ERROR("Write to the TLS session failed (SSL_ERROR_SYSCALL) (%d, %d, %d)", ret, ERR_get_error(), errno);
+					break;
+				case SSL_ERROR_SSL:
+					ERROR("Write to the TLS session failed (SSL_ERROR_SSL) (%d)", ERR_get_error());
+					break;
+				case SSL_ERROR_ZERO_RETURN:
+					ERROR("Write to the TLS session failed (SSL_ERROR_ZERO_RETURN)");
+					break;
+				default:
+					ERROR("Write to the TLS session failed (SSL code %d)", r);
+					break;
+				}
+			}
+		} else
+#endif
+		if (session->fd_output != -1) {
+			ret = write(session->fd_output, _buf, strlen(_buf));
+			if (ret > 0) {c += ret;}
+			else if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+				usleep(NC_WRITE_SLEEP);
+				continue;
+			}
+		} else {
+			ret = -1;
+		}
+#endif
+
+#ifndef DISABLE_LIBSSH
+		if (session->ssh_chan && ret == SSH_ERROR) {
 			DBG_UNLOCK("mut_channel");
 			session->mut_channel_flag = 0;
 			pthread_mutex_unlock(session->mut_channel);
@@ -1579,13 +1679,60 @@ static int nc_session_send(struct nc_session* session, struct nc_msg *msg)
 	}
 	c = 0;
 	do {
+#if 0
 		NC_WRITE(session, &(text[c]), c, ret);
 		if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-			usleep(10);
+			usleep(NC_WRITE_SLEEP);
 			continue;
 		}
+#else
+		_buf = &(text[c]);
 #ifndef DISABLE_LIBSSH
-		if (ret == SSH_ERROR) {
+		if(session->ssh_chan) {
+			ret = ssh_channel_write(session->ssh_chan, _buf, strlen(_buf));
+			if (ret > 0) {c += ret;}
+		} else
+#endif
+#ifdef ENABLE_TLS
+		if (session->tls) {
+			ret = SSL_write(session->tls, _buf, strlen(_buf));
+			if (ret > 0) {c += ret;}
+			else {
+				switch (r = SSL_get_error(session->tls, ret)) {
+				case SSL_ERROR_WANT_READ:
+				case SSL_ERROR_WANT_WRITE:
+					usleep(NC_WRITE_SLEEP);
+					continue;
+				case SSL_ERROR_SYSCALL:
+					ERROR("Write to the TLS session failed (SSL_ERROR_SYSCALL) (%d, %d, %d)", ret, ERR_get_error(), errno);
+					break;
+				case SSL_ERROR_SSL:
+					ERROR("Write to the TLS session failed (SSL_ERROR_SSL) (%d)", ERR_get_error());
+					break;
+				case SSL_ERROR_ZERO_RETURN:
+					ERROR("Write to the TLS session failed (SSL_ERROR_ZERO_RETURN)");
+					break;
+				default:
+					ERROR("Write to the TLS session failed (SSL code %d)", r);
+					break;
+				}
+			}
+		} else
+#endif
+		if (session->fd_output != -1) {
+			ret = write(session->fd_output, _buf, strlen(_buf));
+			if (ret > 0) {c += ret;}
+			else if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+				usleep(NC_WRITE_SLEEP);
+				continue;
+			}
+		} else {
+			ret = -1;
+		}
+#endif
+
+#ifndef DISABLE_LIBSSH
+		if (session->ssh_chan && ret == SSH_ERROR) {
 			DBG_UNLOCK("mut_channel");
 			session->mut_channel_flag = 0;
 			pthread_mutex_unlock(session->mut_channel);
@@ -1621,6 +1768,7 @@ static int nc_session_read_len(struct nc_session* session, size_t chunk_length, 
 	char *buf;
 	ssize_t c;
 	size_t rd = 0;
+	long sleep_count = 0;
 #ifdef ENABLE_TLS
 	int r;
 #endif
@@ -1640,12 +1788,20 @@ static int nc_session_read_len(struct nc_session* session, size_t chunk_length, 
 	}
 
 	while (rd < chunk_length) {
+		if ((READ_TIMEOUT * 1000000) / NC_READ_SLEEP == sleep_count) {
+			ERROR("Reading timeout elapsed.");
+			free(buf);
+			*len = 0;
+			*text = NULL;
+			return (EXIT_FAILURE);
+		}
 #ifndef DISABLE_LIBSSH
 		if (session->ssh_chan) {
 			/* read via libssh */
 			c = ssh_channel_read(session->ssh_chan, &(buf[rd]), chunk_length - rd, 0);
 			if (c == SSH_AGAIN) {
 				usleep (NC_READ_SLEEP);
+				++sleep_count;
 				continue;
 			} else if (c == SSH_ERROR) {
 				ERROR("Reading from the SSH channel failed (%zd: %s)", ssh_get_error_code(session->ssh_sess), ssh_get_error(session->ssh_sess));
@@ -1669,12 +1825,14 @@ static int nc_session_read_len(struct nc_session* session, size_t chunk_length, 
 #ifdef ENABLE_TLS
 		if (session->tls) {
 			/* read via OpenSSL */
-			ERR_clear_error();
+			/* ERR_clear_error(); */
 			c = SSL_read(session->tls, &(buf[rd]), chunk_length - rd);
 			if (c <= 0) {
 				switch (r = SSL_get_error(session->tls, c)) {
 				case SSL_ERROR_WANT_READ:
+				case SSL_ERROR_WANT_WRITE:
 					usleep(NC_READ_SLEEP);
+					++sleep_count;
 					continue;
 				case SSL_ERROR_SYSCALL:
 					ERROR("Read from the TLS session failed (SSL_ERROR_SYSCALL) (%d, %d, %d)", c, ERR_get_error(), errno);
@@ -1740,6 +1898,7 @@ static int nc_session_read_until(struct nc_session* session, const char* endtag,
 	ssize_t c;
 	char *buf = NULL;
 	size_t buflen = 0;
+	long sleep_count = 0;
 #ifdef ENABLE_TLS
 	int x;
 #endif
@@ -1768,12 +1927,20 @@ static int nc_session_read_until(struct nc_session* session, const char* endtag,
 			WARN("%s: reading limit reached.", __func__);
 			return (EXIT_FAILURE);
 		}
+		if ((READ_TIMEOUT * 1000000) / NC_READ_SLEEP == sleep_count) {
+			ERROR("Reading timeout elapsed.");
+			free(buf);
+			*len = 0;
+			*text = NULL;
+			return (EXIT_FAILURE);
+		}
 #ifndef DISABLE_LIBSSH
 		if (session->ssh_chan) {
 			/* read via libssh */
 			c = ssh_channel_read(session->ssh_chan, &(buf[rd]), 1, 0);
 			if (c == SSH_AGAIN) {
 				usleep (NC_READ_SLEEP);
+				++sleep_count;
 				continue;
 			} else if (c == SSH_ERROR) {
 				if (session->ssh_sess != NULL) {
@@ -1802,6 +1969,7 @@ static int nc_session_read_until(struct nc_session* session, const char* endtag,
 					return (EXIT_FAILURE);
 				}
 				usleep (NC_READ_SLEEP);
+				++sleep_count;
 				continue;
 			}
 		} else
@@ -1809,12 +1977,14 @@ static int nc_session_read_until(struct nc_session* session, const char* endtag,
 #ifdef ENABLE_TLS
 		if (session->tls) {
 			/* read via OpenSSL */
-			ERR_clear_error();
+			/* ERR_clear_error(); */
 			c = SSL_read(session->tls, &(buf[rd]), 1);
 			if (c <= 0) {
 				switch (x = SSL_get_error(session->tls, c)) {
 				case SSL_ERROR_WANT_READ:
+				case SSL_ERROR_WANT_WRITE:
 					usleep(NC_READ_SLEEP);
+					++sleep_count;
 					continue;
 				case SSL_ERROR_SYSCALL:
 					ERROR("Read from the TLS session failed (SSL_ERROR_SYSCALL) (%d, %d, %d)", c, ERR_get_error(), errno);
@@ -1846,6 +2016,7 @@ static int nc_session_read_until(struct nc_session* session, const char* endtag,
 			if (c == -1) {
 				if (errno == EAGAIN) {
 					usleep (NC_READ_SLEEP);
+					++sleep_count;
 					continue;
 				} else {
 					ERROR("Reading from an input file descriptor failed (%s)", strerror(errno));
